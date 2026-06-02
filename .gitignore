@@ -1,16 +1,39 @@
+# Python cache / test artifacts
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
+# Local environment / secrets
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 
-data/*.json
+# Local agent/tool state
+.agents/
+.codex/
+
+# Benchmark data should be supplied locally.
+data/**
+!data/
 !data/.gitkeep
 
-outputs/*
+# Generated experiment artifacts.
+outputs/**
+!outputs/
 !outputs/.gitkeep
 
+# Runtime files
 *.log
 *.pid
+
+# Editor / OS files
 .DS_Store
+.idea/
+.vscode/

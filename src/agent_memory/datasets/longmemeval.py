@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from src.memory.core.schema import Example, Turn
+from agent_memory.core.schema import Example, Turn
 
 
 def load_longmemeval_records(records: list[dict[str, Any]]) -> list[Example]:

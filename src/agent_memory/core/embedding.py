@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from typing import Iterable
 
 import numpy as np
+import httpx
 from openai import OpenAI
 
 
@@ -30,7 +33,11 @@ class EmbeddingClient:
         self.normalize = normalize
         self.query_instruction = query_instruction
         self.max_input_bytes = max_input_bytes
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=make_http_client(base_url),
+        )
 
     def embed_documents(self, texts: Iterable[str]) -> EmbeddingResult:
         return self._embed(texts)
@@ -76,3 +83,26 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
     head_text = encoded[:head].decode("utf-8", errors="ignore")
     tail_text = encoded[-tail:].decode("utf-8", errors="ignore") if tail else ""
     return head_text + marker.decode("utf-8") + tail_text
+
+
+def is_local_url(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def make_http_client(base_url: str) -> httpx.Client:
+    if is_local_url(base_url):
+        return httpx.Client(trust_env=False)
+
+    proxy = first_http_proxy()
+    if proxy:
+        return httpx.Client(trust_env=False, proxy=proxy)
+    return httpx.Client(trust_env=False)
+
+
+def first_http_proxy() -> str:
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.environ.get(name, "")
+        if value.startswith(("http://", "https://")):
+            return value
+    return ""

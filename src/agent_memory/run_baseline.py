@@ -9,26 +9,24 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from src.memory.baseline.pipeline import NaiveRagBaseline
-from src.memory.baseline.store import store_exists
-from src.memory.core.config import get_config, load_config, set_if_not_none
-from src.memory.core.embedding import EmbeddingClient
-from src.memory.core.io import TeeLogger, append_jsonl, completed_ids, load_env_file
-from src.memory.core.llm import ChatClient
-from src.memory.core.schema import Example
-from src.memory.datasets import load_examples
+from agent_memory.baseline.pipeline import METHOD_NAME, NaiveRagBaseline
+from agent_memory.baseline.store import store_exists
+from agent_memory.core.config import get_config, load_config
+from agent_memory.core.embedding import EmbeddingClient
+from agent_memory.core.io import TeeLogger, append_jsonl, completed_ids, load_env_file
+from agent_memory.core.llm import ChatClient
+from agent_memory.core.schema import Example
+from agent_memory.datasets import load_examples
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Agent Memory naive RAG baseline.")
-    parser.add_argument("--config", type=Path, default=Path("src/memory/configs/base.yaml"))
+    parser = argparse.ArgumentParser(description=f"Run the Agent Memory LTS baseline: {METHOD_NAME}.")
+    parser.add_argument("--config", type=Path, default=Path("src/agent_memory/configs/base.yaml"))
     parser.add_argument("--dataset", choices=("auto", "longmemeval", "locomo"), default="auto")
-    parser.add_argument("--data", type=Path, default=Path("src/memory/data/longmemeval_s_cleaned.json"))
+    parser.add_argument("--data", type=Path, default=Path("data/longmemeval_s_cleaned.json"))
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--store-root", type=Path, default=None)
     parser.add_argument("--mode", choices=("full", "build", "query"), default="full")
-    parser.add_argument("--chunk-unit", choices=("turn", "pair"), default=None)
-    parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
@@ -45,6 +43,7 @@ def parse_args() -> argparse.Namespace:
 
 def make_baseline(config: dict[str, Any], answer_api_key: str) -> NaiveRagBaseline:
     embedding_cfg = config["embedding"]
+    answer_cfg = config["answer"]
     return NaiveRagBaseline(
         embedding_client=EmbeddingClient(
             model=str(embedding_cfg["name"]),
@@ -58,9 +57,25 @@ def make_baseline(config: dict[str, Any], answer_api_key: str) -> NaiveRagBaseli
         answer_client=ChatClient(
             api_key=answer_api_key,
             base_url=str(get_config(config, "answer.base_url", "")),
+            timeout_seconds=float(answer_cfg.get("timeout_seconds", 120)),
+            max_retries=int(answer_cfg.get("max_retries", 2)),
+            default_seed=optional_int(get_config(config, "answer.seed")),
+            default_top_p=optional_float(get_config(config, "answer.top_p")),
         ),
         config=config,
     )
+
+
+def optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def group_by_memory(examples: list[Example]) -> list[tuple[str, list[tuple[int, Example]]]]:
@@ -84,7 +99,7 @@ def error_record(example: Example, exc: Exception) -> dict[str, Any]:
         "question": example.question,
         "answer": example.answer,
         "hypothesis": "",
-        "method": "naive_rag_baseline",
+        "method": METHOD_NAME,
         "error": repr(exc),
     }
 
@@ -92,11 +107,7 @@ def error_record(example: Example, exc: Exception) -> dict[str, Any]:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    set_if_not_none(config, "retrieval.chunk_unit", args.chunk_unit)
-    set_if_not_none(config, "retrieval.top_k", args.top_k)
-
-    env_file = get_config(config, "paths.env_file", ".env")
-    load_env_file(env_file)
+    load_env_file(str(get_config(config, "paths.env_file", ".env")))
 
     out = args.out or Path(str(get_config(config, "paths.prediction_file")))
     store_root = args.store_root or Path(str(get_config(config, "paths.store_root")))
@@ -116,8 +127,7 @@ def main() -> None:
         args.log_file.unlink()
     done = set() if args.overwrite or args.mode == "build" else completed_ids(out)
     groups = group_by_memory(examples)
-    workers = args.workers or default_workers(examples)
-    workers = max(1, workers)
+    workers = max(1, args.workers or default_workers(examples))
 
     with TeeLogger(args.log_file) as logger:
         log_lock = Lock()
@@ -179,7 +189,7 @@ def main() -> None:
                         raise
 
         log(
-            f"run start dataset={args.dataset} data={args.data} mode={args.mode} "
+            f"run start method={METHOD_NAME} dataset={args.dataset} data={args.data} mode={args.mode} "
             f"records={len(examples)} memories={len(groups)} workers={workers} "
             f"out={out} store_root={store_root}"
         )
@@ -189,10 +199,7 @@ def main() -> None:
                 run_group(memory_id, group)
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(run_group, memory_id, group): memory_id
-                    for memory_id, group in groups
-                }
+                futures = {executor.submit(run_group, memory_id, group): memory_id for memory_id, group in groups}
                 for future in as_completed(futures):
                     memory_id = futures[future]
                     try:

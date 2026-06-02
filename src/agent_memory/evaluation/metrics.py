@@ -9,8 +9,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from src.memory.core.io import ensure_parent, load_jsonl
-from src.memory.datasets.locomo import locomo_category_name
+from agent_memory.core.io import ensure_parent, load_jsonl
+from agent_memory.datasets.locomo import locomo_category_name
 
 
 def normalize(text: str) -> str:

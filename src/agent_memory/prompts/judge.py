@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.memory.core.schema import Example
+from agent_memory.core.schema import Example
 
 
 LOCOMO_JUDGE_TEMPLATE = """Your task is to label an answer to a question as 'CORRECT' or 'WRONG'. You will be given the following data:

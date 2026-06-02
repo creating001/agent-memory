@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from src.memory.core.io import read_json, write_json
-from src.memory.core.schema import Chunk
+from agent_memory.core.io import read_json, write_json
+from agent_memory.core.schema import Chunk
 
 
 def save_store(path: str | Path, chunks: list[Chunk], embeddings: np.ndarray, stats: dict[str, Any]) -> None:

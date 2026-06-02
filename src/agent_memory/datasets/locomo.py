@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.memory.core.schema import Example, Turn
+from agent_memory.core.schema import Example, Turn
 
 
 LOCOMO_CATEGORY_NAMES = {

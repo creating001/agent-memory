@@ -1,332 +1,128 @@
-# Agent Memory 项目
+# Agent Memory Baseline
 
-## 对齐清单
+本项目提供一个简洁、可复现的 Agent Memory baseline，用于长对话记忆构建、检索、回答生成和评测。
 
-记录 Agent Memory 实验中需要统一固定的公共设置。后续方法迭代时，默认只改变 memory 方法本身；下面这些设置应保持一致。
+方法在预测阶段只使用本地部署的 answer model 和 embedding model，不使用 reference answer、sample id、question type 或 judge label 参与预测。Judge model 只用于最终评测。
 
-### 1. 模型协议
+## 方法概览
 
-- Answer 模型配置
-
-```yaml
-answer:
-  name: Qwen/Qwen3-30B-A3B-Instruct-2507
-  service: local_vllm_chat_completion
-  temperature: 0.0
-  max_tokens: 8192
-  thinking: default
-```
-
-- Embedding 模型配置
-
-```yaml
-embedding:
-  name: Qwen/Qwen3-Embedding-0.6B
-  service: local_vllm_embedding
-  dims: 1024
-  max_model_len: 8192
-  gpu_memory_utilization: 0.05
-  max_input_bytes: 8192
-  normalize: true
-```
-
-- Judge 模型配置
-
-```yaml
-judge:
-  name: deepseek-v4-flash
-  base_url: https://api.deepseek.com
-  api_key_env: DEEPSEEK_API_KEY
-  temperature: 0.0
-  max_tokens: 8192
-  timeout_seconds: 120
-  max_retries: 2
-  thinking: default
-```
-
-### 2. Prompt Template 协议
-
-- Answer template
-
-普通问题的 answer prompt：
 ```text
-Answer the user's question based on the provided context.
+memory build:
+  chunk_unit: turn
+  memory content: raw dialogue turn
+  embedding text: Date + turn text
+  build LLM: none
 
-User Question: {query}
-
-Relevant Context: {context_str}
-
-Requirements:
-1. First, think through the reasoning process
-2. Then provide a very CONCISE answer (short phrase about core information)
-3. Answer must be based ONLY on the provided context
-4. All dates in the response must be formatted as 'DD Month YYYY' but you can output more or less details if needed
-5. Return your response in JSON format
-
-Output Format:
-{
-  "reasoning": "Brief explanation of your thought process",
-  "answer": "Concise answer in a short phrase"
-}
-
-Now answer the question. Return ONLY the JSON, no other text.
-```
-
-LoCoMo Category 5 的 answer prompt：
-```text
-Based on the context below, answer the following question.
-
-Context:{context_str}
-
-Question: {question}
-
-Select the correct answer from the following two options. If the given answer is wrong or not answerable based on the context, you should choose "Not mentioned in the conversation".
-
-Option A: {option_a}
-Option B: {option_b}
-
-Requirements:
-1. Choose the option that best matches the context
-2. If neither answer is supported by the context, or if the provided specific answer is incorrect, choose "Not mentioned in the conversation"
-3. Return your response in JSON format
-
-Output Format:
-{
-  "reasoning": "Brief explanation of your choice",
-  "answer": "Your selected answer"
-}
-
-Return ONLY the JSON, no other text.
-```
-
-- Judge template
-
-LoCoMo:
-```text
-Your task is to label an answer to a question as ’CORRECT’ or ’WRONG’. You will be given the following data:
-    (1) a question (posed by one user to another user), 
-    (2) a ’gold’ (ground truth) answer, 
-    (3) a generated answer
-which you will score as CORRECT/WRONG.
-
-The point of the question is to ask about something one user should know about the other user based on their prior conversations.
-The gold answer will usually be a concise and short answer that includes the referenced topic, for example:
-Question: Do you remember what I got the last time I went to Hawaii?
-Gold answer: A shell necklace
-The generated answer might be much longer, but you should be generous with your grading - as long as it touches on the same topic as the gold answer, it should be counted as CORRECT. 
-
-For time related questions, the gold answer will be a specific date, month, year, etc. The generated answer might be much longer or use relative time references (like "last Tuesday" or "next month"), but you should be generous with your grading - as long as it refers to the same date or time period as the gold answer, it should be counted as CORRECT. Even if the format differs (e.g., "May 7th" vs "7 May"), consider it CORRECT if it's the same date.
-
-Now it's time for the real question:
-Question: {question}
-Gold answer: {gold_answer}
-Generated answer: {generated_answer}
-
-Return ONLY a valid JSON object in the following format:
-{
-  "label": "CORRECT"
-}
-
-The value of "label" must be exactly "CORRECT" or "WRONG". Do not include any explanation or extra text.
-```
-
-LongMemEval:
-
-`single-session-user` / `single-session-assistant` / `multi-session`:
-```text
-I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer yes or no only.
-```
-
-`temporal-reasoning`:
-```text
-I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer yes or no only.
-```
-
-`knowledge-update`:
-```text
-I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer yes or no only.
-```
-
-`single-session-preference`:
-```text
-I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.
-
-Question: {question}
-
-Rubric: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer yes or no only.
-```
-
-`abstention`:
-```text
-I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.
-
-Question: {question}
-
-Explanation: {answer}
-
-Model Response: {response}
-
-Does the model correctly identify the question as unanswerable? Answer yes or no only.
-```
-
-### 3. 指标协议
-
-```yaml
 retrieval:
-  top_k: must_report
+  base: dense semantic retrieval
+  query: question + question_date when available
+  fusion: RRF over semantic, expanded semantic, lexical, and reflective views
+  routing: selected from question text only
 
-metrics:
-  accuracy:
-    source: llm_judge
-    locomo_positive_label: CORRECT
-    longmemeval_positive_label: yes
-    unknown: wrong
+answer:
+  model: local Qwen/Qwen3-30B-A3B-Instruct-2507
+  temperature: 0.0
+  format: JSON with answer field
+  verification: used for narrow order / first temporal questions
 
-  f1:
-    type: token_level_macro_f1
-    normalization: lowercase_then_regex_word_tokens
-
-  bleu:
-    type: corpus_bleu_4
-    normalization: lowercase_then_regex_word_tokens
- 
-  by_type:
-    group_by: question_type_or_category
-    fields: [accuracy, f1, bleu]
-
-  token_cost:
-    fields: [build_tokens, query_tokens]
-
-  time_cost:
-    fields: [build_time_seconds, query_time_seconds]
+judge:
+  model: DeepSeek
+  use: evaluation only
 ```
 
-## 4. 基建 Baseline
+## 
 
-当前实现一个最小 naive RAG baseline，作为后续方法迭代的基础代码。
-
-### 4.1 执行流程
+运行时只根据 question text 选择一个 route：
 
 ```text
-原始数据
-  -> 统一读取为 Example
-  -> 将历史对话切成 chunk
-  -> 对 embedding 输入按 max_input_bytes 截断后编码 chunk
-  -> 保存 chunk 和 embedding
-  -> 对 question 编码；如果样本包含 benchmark question_date，则一起作为检索 query
-  -> cosine similarity 检索 top-k chunk
-  -> 使用统一 answer prompt 生成答案
-  -> 输出 prediction jsonl
-  -> 使用统一 judge prompt 评测
-  -> 统计 accuracy / F1 / BLEU / token cost / time cost
+auto:
+  default route
+
+prefer_user:
+  for count / preference-like questions that should prefer user-side evidence
+
+duration_temporal:
+  for how long / since / days ago / weeks ago / months ago questions
+
+order_reflective:
+  for first / order / chronological questions
+  uses reflective retrieval and local answer verification
+
+state_history:
+  for previous / initial / original / used to / usually questions
+
+recency_auto:
+  for most recent / most recently questions
 ```
 
-### 4.2 代码结构
+这些 route 不读取 benchmark label，也不读取 gold answer。
 
-```text
-src/memory/
-  configs/
-    base.yaml              # 公共配置：answer、embedding、judge、retrieval、输出路径
-
-  data/
-    locomo10.json               # LoCoMo benchmark 数据
-    longmemeval_s_cleaned.json  # LongMemEval benchmark 数据
-
-  core/
-    config.py              # 读取和覆盖 yaml 配置
-    io.py                  # env、json、jsonl 读写
-    schema.py              # Example、Turn、Chunk、RetrievedChunk
-    embedding.py           # 本地 vLLM embedding 客户端
-    llm.py                 # OpenAI-compatible chat 客户端
-
-  datasets/
-    load.py                # 根据 dataset 参数分发到具体 loader
-    longmemeval.py         # LongMemEval -> Example
-    locomo.py              # LoCoMo -> Example
-
-  prompts/
-    answer.py              # answer prompt、LoCoMo category 5 prompt、答案解析
-    judge.py               # LoCoMo / LongMemEval judge prompt
-
-  baseline/
-    chunking.py            # turn / pair 两种 chunk 方式
-    store.py               # 保存和读取 chunk + embedding
-    retrieve.py            # cosine top-k 检索
-    pipeline.py            # build_memory 和 answer 主逻辑
-
-  evaluation/
-    judge.py               # 调 judge 模型生成 judge_label
-    metrics.py             # 统计 F1、BLEU、token/time cost
-
-  run_baseline.py          # baseline 命令行入口，按 memory_id 分组并行
-```
-
-### 4.3 配置入口
+## Configuration
 
 默认配置文件：
 
 ```text
-src/memory/configs/base.yaml
+src/agent_memory/configs/base.yaml
 ```
 
-命令行中可以临时覆盖部分配置。下面这个例子不会修改 `base.yaml`，只会让本次运行使用 `top_k=20`、`chunk_unit=turn`，并把输出写到指定路径：
+核心设置：
 
-```bash
-python -m src.memory.run_baseline \
-  --config src/memory/configs/base.yaml \
-  --dataset longmemeval \
-  --data src/memory/data/longmemeval_s_cleaned.json \
-  --top-k 20 \
-  --chunk-unit turn \
-  --out src/memory/outputs/baseline/predictions.jsonl \
-  --store-root src/memory/outputs/baseline/stores \
-  --log-file src/memory/outputs/logs/baseline.log \
-  --mode full \
-  --workers 4 \
-  --overwrite
+```yaml
+retrieval:
+  chunk_unit: turn
+  top_k: 40
+
+answer:
+  temperature: 0.0
+  max_tokens: 8192
+  final_max_tokens: 1024
+
+embedding:
+  dims: 1024
+  normalize: true
+  max_input_bytes: 8192
 ```
 
-### 4.4 运行 Baseline
+## Project Structure
+
+```text
+src/agent_memory/
+  baseline/
+    chunking.py     # turn-level memory chunk construction
+    store.py        # chunk / embedding / build stats persistence
+    retrieve.py     # dense retrieval, BM25 lexical retrieval, RRF fusion
+    routing.py      # route, strategy, and top-k rules
+    queries.py      # query text, lexical expansion, retrieved rerank helpers
+    guardrails.py   # answer post-processing and narrow guardrails
+    pipeline.py     # build / retrieve / answer orchestration
+  configs/          # model, retrieval, and path config
+  core/             # LLM, embedding, schema, IO utilities
+  datasets/         # LongMemEval and LoCoMo loaders
+  evaluation/       # judge and metrics
+  prompts/          # answer, retrieval, and judge prompts
+  run_baseline.py   # command-line entry
+
+data/               # local datasets; see dataset links below
+docs/               # method notes and evaluation summaries
+outputs/            # local outputs
+```
+
+Dataset files:
+
+- `data/longmemeval_s_cleaned.json`: [LongMemEval-S cleaned](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json)
+- `data/locomo10.json`: [LoCoMo](https://github.com/snap-research/locomo/blob/main/data/locomo10.json)
+
+## Run
 
 LongMemEval：
 
 ```bash
-python -m src.memory.run_baseline \
+PYTHONPATH=src python -m agent_memory.run_baseline \
   --dataset longmemeval \
-  --data src/memory/data/longmemeval_s_cleaned.json \
-  --out src/memory/outputs/baseline/longmemeval_predictions.jsonl \
-  --store-root src/memory/outputs/baseline/longmemeval_stores \
-  --log-file src/memory/outputs/logs/longmemeval_run.log \
-  --mode full \
-  --top-k 20 \
+  --data data/longmemeval_s_cleaned.json \
+  --out outputs/baseline/predictions.jsonl \
+  --store-root outputs/baseline/stores \
+  --log-file outputs/logs/run.log \
   --workers 4 \
   --overwrite
 ```
@@ -334,106 +130,42 @@ python -m src.memory.run_baseline \
 LoCoMo：
 
 ```bash
-python -m src.memory.run_baseline \
+PYTHONPATH=src python -m agent_memory.run_baseline \
   --dataset locomo \
-  --data src/memory/data/locomo10.json \
-  --out src/memory/outputs/baseline/locomo_predictions.jsonl \
-  --store-root src/memory/outputs/baseline/locomo_stores \
-  --log-file src/memory/outputs/logs/locomo_run.log \
-  --mode full \
-  --top-k 20 \
+  --data data/locomo10.json \
+  --out outputs/baseline/locomo_predictions.jsonl \
+  --store-root outputs/baseline/locomo_stores \
+  --log-file outputs/logs/locomo_run.log \
   --workers 2 \
   --overwrite
 ```
 
-默认并行数按数据集设置：LongMemEval 为 4，LoCoMo 为 2。也可以通过 `--workers` 手动覆盖。
-
-只构建 memory：
+也可以分阶段运行：
 
 ```bash
-python -m src.memory.run_baseline \
-  --dataset longmemeval \
-  --data src/memory/data/longmemeval_s_cleaned.json \
-  --store-root src/memory/outputs/baseline/longmemeval_stores \
-  --log-file src/memory/outputs/logs/longmemeval_build.log \
-  --mode build \
-  --workers 4 \
-  --overwrite
+PYTHONPATH=src python -m agent_memory.run_baseline --mode build ...
+PYTHONPATH=src python -m agent_memory.run_baseline --mode query ...
 ```
 
-只生成答案：
+## Evaluation Results
 
-```bash
-python -m src.memory.run_baseline \
-  --dataset longmemeval \
-  --data src/memory/data/longmemeval_s_cleaned.json \
-  --out src/memory/outputs/baseline/longmemeval_predictions.jsonl \
-  --store-root src/memory/outputs/baseline/longmemeval_stores \
-  --log-file src/memory/outputs/logs/longmemeval_query.log \
-  --mode query \
-  --workers 4
-```
-
-### 4.5 评测
-
-先用 judge 模型打标签：
-
-```bash
-python -m src.memory.evaluation.judge \
-  --pred src/memory/outputs/baseline/longmemeval_predictions.jsonl \
-  --out src/memory/outputs/baseline/longmemeval_predictions.judge.jsonl \
-  --log-file src/memory/outputs/logs/longmemeval_judge.log \
-  --overwrite
-```
-
-再统计指标：
-
-```bash
-python -m src.memory.evaluation.metrics \
-  --pred src/memory/outputs/baseline/longmemeval_predictions.judge.jsonl \
-  --out src/memory/outputs/baseline/longmemeval_metrics.md \
-  --format markdown
-```
-
-### 4.6 输出字段
-
-prediction jsonl 中每一行对应一个 QA。正常成功样本包含：
+LongMemEval：
 
 ```text
-sample_id                 # QA id
-memory_id                 # 共享 memory 的 id；LoCoMo 中同一 conversation 共享同一个 memory_id
-dataset                   # longmemeval 或 locomo
-question                  # 当前问题
-question_date             # benchmark 给定的问题日期，不使用系统当前日期
-question_type             # 题目类型
-answer                    # reference answer
-hypothesis                # answer 模型生成的最终答案
-raw_response              # answer 模型原始输出
-method                    # naive_rag_baseline
-model                     # answer 模型
-embedding_model           # embedding 模型
-chunk_unit                # turn / pair
-top_k                     # 检索返回数量
-num_chunks                # 当前 memory 中的 chunk 数
-build_tokens              # memory 构建阶段 token
-query_tokens              # query + answer 阶段 token
-build_time_seconds        # memory 构建耗时
-query_time_seconds        # 当前 QA 检索和回答耗时
-error                     # 成功时为 null
+accuracy:          417 / 500 = 0.8340
+f1:                0.4538
+bleu:              0.1179
+build_tokens:      0
+query_tokens:      2,367,025
+avg_query_tokens:  4,734.1 / sample
 ```
 
-judge 后的 jsonl 会在原 prediction 字段基础上额外增加：
+LoCoMo：
 
 ```text
-judge_model               # judge 模型
-judge_response            # judge 模型原始输出
-judge_label               # true / false / null
-judge_tokens              # judge 阶段 token
-```
-
-metrics 文件默认建议保存为 Markdown 表格，包含整体指标和按题目类型分组的指标：
-
-```text
-src/memory/outputs/baseline/longmemeval_metrics.md  # LongMemEval 指标表
-src/memory/outputs/baseline/locomo_metrics.md       # LoCoMo 指标表
+accuracy:          1489 / 1986 = 0.7497
+f1:                0.5381
+bleu:              0.2371
+query_tokens:      2,520,124
+avg_query_tokens:  1,269.0 / sample
 ```
