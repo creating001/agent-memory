@@ -70,14 +70,18 @@ def ngrams(items: list[str], order: int) -> Counter[tuple[str, ...]]:
 def report(predictions: list[dict[str, Any]]) -> dict[str, Any]:
     valid = [row for row in predictions if not row.get("error") and str(row.get("hypothesis") or "").strip()]
     build_rows = dedupe_by_memory(valid)
+    build_time_seconds = sum(float(row.get("build_time_seconds") or 0.0) for row in build_rows)
+    query_time_seconds = sum(float(row.get("query_time_seconds") or 0.0) for row in valid)
     overall = {
         "num_predictions": len(predictions),
         "num_valid": len(valid),
         **score_rows(valid),
         "build_tokens": sum(int(row.get("build_tokens") or 0) for row in build_rows),
         "query_tokens": sum(int(row.get("query_tokens") or 0) for row in valid),
-        "build_time_seconds": sum(float(row.get("build_time_seconds") or 0.0) for row in build_rows),
-        "query_time_seconds": sum(float(row.get("query_time_seconds") or 0.0) for row in valid),
+        "build_time_seconds": build_time_seconds,
+        "query_time_seconds": query_time_seconds,
+        "avg_build_time_seconds_per_sample": build_time_seconds / len(build_rows) if build_rows else 0.0,
+        "avg_query_time_seconds_per_qa": query_time_seconds / len(valid) if valid else 0.0,
     }
     return {
         **overall,
@@ -168,6 +172,8 @@ def format_markdown(result: dict[str, Any]) -> str:
         ("query_tokens", result.get("query_tokens")),
         ("build_time_seconds", format_float(result.get("build_time_seconds"))),
         ("query_time_seconds", format_float(result.get("query_time_seconds"))),
+        ("avg_build_time_seconds_per_sample", format_float(result.get("avg_build_time_seconds_per_sample"))),
+        ("avg_query_time_seconds_per_qa", format_float(result.get("avg_query_time_seconds_per_qa"))),
     ]
     lines = ["## Overall", "", "| metric | value |", "|---|---:|"]
     lines.extend(f"| {key} | {value} |" for key, value in rows)

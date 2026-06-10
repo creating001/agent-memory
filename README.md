@@ -158,11 +158,15 @@ PYTHONPATH=src python -m agent_memory.evaluation.retained
 ```text
 LongMemEval full:
   accuracy: 421 / 500 = 0.8420
-  avg query tokens: 4,714.2 / sample
+  avg query tokens: 4,714.2 / QA
+  avg build time: 14.924 s / sample
+  avg query time: 7.360 s / QA
 
 LoCoMo non-adversarial:
   accuracy: 1248 / 1540 = 0.8104
-  avg query tokens: 5,150.8 / sample
+  avg query tokens: 5,150.8 / QA
+  avg build time: 3.826 s / sample
+  avg query time: 25.990 s / QA
 ```
 
 Retained artifacts:

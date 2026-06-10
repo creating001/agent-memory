@@ -27,10 +27,10 @@ matching the project evaluation setting.
 
 ## Retained Full Results
 
-| benchmark | split | correct / total | accuracy | avg query tokens |
-|---|---:|---:|---:|---:|
-| LongMemEval | full | 421 / 500 | 84.20% | 4714.2 |
-| LoCoMo | non-adversarial | 1248 / 1540 | 81.04% | 5150.8 |
+| benchmark | split | correct / total | accuracy | avg query tokens | avg build time / sample | avg query time / QA |
+|---|---:|---:|---:|---:|---:|---:|
+| LongMemEval | full | 421 / 500 | 84.20% | 4714.2 | 14.924s | 7.360s |
+| LoCoMo | non-adversarial | 1248 / 1540 | 81.04% | 5150.8 | 3.826s | 25.990s |
 
 Retained artifacts:
 
