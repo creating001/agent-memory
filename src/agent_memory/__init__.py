@@ -1,1 +1,1 @@
-"""Agent Memory LTS baseline package."""
+"""Agent Memory strong baseline package."""

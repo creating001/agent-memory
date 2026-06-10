@@ -26,12 +26,14 @@ def load_locomo_records(records: list[dict[str, Any]]) -> list[Example]:
         speaker_a = str(conversation.get("speaker_a") or "speaker_a")
         speaker_b = str(conversation.get("speaker_b") or "speaker_b")
         turns = _conversation_turns(conversation, speaker_a, speaker_b)
+        session_metadata = _session_metadata(conversation)
 
         for qa_index, qa in enumerate(record.get("qa") or [], start=1):
             if not isinstance(qa, dict):
                 continue
+            original_qa_index = _qa_index(qa, qa_index)
             category = qa.get("category")
-            sample_id = f"{conversation_id}_qa_{qa_index:03d}"
+            sample_id = f"{conversation_id}_qa_{original_qa_index:03d}"
             answer = qa.get("answer")
             if str(category) == "5" and not answer:
                 answer = "Not mentioned in the conversation"
@@ -49,12 +51,36 @@ def load_locomo_records(records: list[dict[str, Any]]) -> list[Example]:
                         **qa,
                         "conversation_id": conversation_id,
                         "category": category,
+                        "qa_index": original_qa_index,
                         "speaker_a": speaker_a,
                         "speaker_b": speaker_b,
+                        **session_metadata,
                     },
                 )
             )
     return examples
+
+
+def _qa_index(qa: dict[str, Any], fallback: int) -> int:
+    try:
+        value = int(qa.get("qa_index") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _session_metadata(conversation: dict[str, Any]) -> dict[str, Any]:
+    return {"locomo_session_dates": _session_dates(conversation)}
+
+
+def _session_dates(conversation: dict[str, Any]) -> dict[str, str]:
+    dates: dict[str, str] = {}
+    for key, value in conversation.items():
+        if not key.startswith("session_") or not key.endswith("_date_time"):
+            continue
+        session_id = key.removesuffix("_date_time")
+        dates[session_id] = str(value or "")
+    return dates
 
 
 def _conversation_turns(conversation: dict[str, Any], speaker_a: str, speaker_b: str) -> list[Turn]:

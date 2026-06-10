@@ -9,18 +9,17 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from agent_memory.baseline.pipeline import METHOD_NAME, NaiveRagBaseline
+from agent_memory.baseline.factory import make_baseline
+from agent_memory.baseline.pipeline import METHOD_NAME
 from agent_memory.baseline.store import store_exists
 from agent_memory.core.config import get_config, load_config
-from agent_memory.core.embedding import EmbeddingClient
 from agent_memory.core.io import TeeLogger, append_jsonl, completed_ids, load_env_file
-from agent_memory.core.llm import ChatClient
 from agent_memory.core.schema import Example
 from agent_memory.datasets import load_examples
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=f"Run the Agent Memory LTS baseline: {METHOD_NAME}.")
+    parser = argparse.ArgumentParser(description="Run the Agent Memory baseline.")
     parser.add_argument("--config", type=Path, default=Path("src/agent_memory/configs/base.yaml"))
     parser.add_argument("--dataset", choices=("auto", "longmemeval", "locomo"), default="auto")
     parser.add_argument("--data", type=Path, default=Path("data/longmemeval_s_cleaned.json"))
@@ -29,6 +28,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("full", "build", "query"), default="full")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--start", type=int, default=0)
+    parser.add_argument(
+        "--include-question-type",
+        action="append",
+        default=[],
+        help="Only run examples with this question_type. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--exclude-question-type",
+        action="append",
+        default=[],
+        help="Skip examples with this question_type. Can be passed multiple times.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--stop-on-error", action="store_true")
     parser.add_argument("--log-file", type=Path, default=None)
@@ -39,43 +50,6 @@ def parse_args() -> argparse.Namespace:
         help="Parallel memory groups. Defaults: LoCoMo=2, LongMemEval=4.",
     )
     return parser.parse_args()
-
-
-def make_baseline(config: dict[str, Any], answer_api_key: str) -> NaiveRagBaseline:
-    embedding_cfg = config["embedding"]
-    answer_cfg = config["answer"]
-    return NaiveRagBaseline(
-        embedding_client=EmbeddingClient(
-            model=str(embedding_cfg["name"]),
-            base_url=str(embedding_cfg["base_url"]),
-            api_key=str(embedding_cfg.get("api_key", "EMPTY")),
-            batch_size=int(embedding_cfg.get("batch_size", 64)),
-            normalize=bool(embedding_cfg.get("normalize", True)),
-            query_instruction=str(embedding_cfg.get("query_instruction", "")),
-            max_input_bytes=int(embedding_cfg.get("max_input_bytes", 0)),
-        ),
-        answer_client=ChatClient(
-            api_key=answer_api_key,
-            base_url=str(get_config(config, "answer.base_url", "")),
-            timeout_seconds=float(answer_cfg.get("timeout_seconds", 120)),
-            max_retries=int(answer_cfg.get("max_retries", 2)),
-            default_seed=optional_int(get_config(config, "answer.seed")),
-            default_top_p=optional_float(get_config(config, "answer.top_p")),
-        ),
-        config=config,
-    )
-
-
-def optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    return int(value)
-
-
-def optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    return float(value)
 
 
 def group_by_memory(examples: list[Example]) -> list[tuple[str, list[tuple[int, Example]]]]:
@@ -91,7 +65,42 @@ def default_workers(examples: list[Example]) -> int:
     return 4
 
 
-def error_record(example: Example, exc: Exception) -> dict[str, Any]:
+def filter_examples(
+    examples: list[Example],
+    *,
+    include_question_types: list[str],
+    exclude_question_types: list[str],
+) -> list[Example]:
+    include = normalized_type_set(include_question_types)
+    exclude = normalized_type_set(exclude_question_types)
+    if not include and not exclude:
+        return examples
+    filtered = []
+    for example in examples:
+        question_type = normalize_question_type(example.question_type)
+        if include and question_type not in include:
+            continue
+        if exclude and question_type in exclude:
+            continue
+        filtered.append(example)
+    return filtered
+
+
+def normalized_type_set(values: list[str]) -> set[str]:
+    result: set[str] = set()
+    for value in values:
+        for item in str(value).split(","):
+            normalized = normalize_question_type(item)
+            if normalized:
+                result.add(normalized)
+    return result
+
+
+def normalize_question_type(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().replace("_", "-").split())
+
+
+def error_record(example: Example, exc: Exception, *, method_name: str = METHOD_NAME) -> dict[str, Any]:
     return {
         "sample_id": example.sample_id,
         "memory_id": example.memory_id,
@@ -99,7 +108,7 @@ def error_record(example: Example, exc: Exception) -> dict[str, Any]:
         "question": example.question,
         "answer": example.answer,
         "hypothesis": "",
-        "method": METHOD_NAME,
+        "method": method_name,
         "error": repr(exc),
     }
 
@@ -108,6 +117,7 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     load_env_file(str(get_config(config, "paths.env_file", ".env")))
+    method_name = str(get_config(config, "retrieval.method", METHOD_NAME))
 
     out = args.out or Path(str(get_config(config, "paths.prediction_file")))
     store_root = args.store_root or Path(str(get_config(config, "paths.store_root")))
@@ -116,6 +126,11 @@ def main() -> None:
         raise ValueError("Missing answer model API key environment variable.")
 
     examples = load_examples(args.data, dataset=args.dataset)
+    examples = filter_examples(
+        examples,
+        include_question_types=args.include_question_type,
+        exclude_question_types=args.exclude_question_type,
+    )
     if args.start:
         examples = examples[args.start :]
     if args.limit:
@@ -168,7 +183,7 @@ def main() -> None:
             except Exception as exc:
                 if args.mode != "build":
                     for _, example in pending:
-                        write_record(error_record(example, exc))
+                        write_record(error_record(example, exc, method_name=method_name))
                 log(f"[memory {memory_id}] build error: {exc}")
                 if args.stop_on_error:
                     raise
@@ -183,13 +198,13 @@ def main() -> None:
                     write_record(record)
                     log(f"[{index}/{total}] done {example.sample_id} answer={record['hypothesis'][:80]!r}")
                 except Exception as exc:
-                    write_record(error_record(example, exc))
+                    write_record(error_record(example, exc, method_name=method_name))
                     log(f"[{index}/{total}] error {example.sample_id}: {exc}")
                     if args.stop_on_error:
                         raise
 
         log(
-            f"run start method={METHOD_NAME} dataset={args.dataset} data={args.data} mode={args.mode} "
+            f"run start method={method_name} dataset={args.dataset} data={args.data} mode={args.mode} "
             f"records={len(examples)} memories={len(groups)} workers={workers} "
             f"out={out} store_root={store_root}"
         )

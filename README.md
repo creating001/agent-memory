@@ -1,116 +1,97 @@
 # Agent Memory Baseline
 
-本项目提供一个简洁、可复现的 Agent Memory baseline，用于长对话记忆构建、检索、回答生成和评测。
+Unified long-context memory QA baseline for LongMemEval and LoCoMo. The default
+pipeline uses the same prediction algorithm for both datasets and routes by
+question semantics rather than dataset labels or sample ids.
 
-方法在预测阶段只使用本地部署的 answer model 和 embedding model，不使用 reference answer、sample id、question type 或 judge label 参与预测。Judge model 只用于最终评测。
-
-## 方法概览
+## Method
 
 ```text
 memory build:
   chunk_unit: turn
-  memory content: raw dialogue turn
+  memory content: raw dialogue turns
   embedding text: Date + turn text
   build LLM: none
 
 retrieval:
-  base: dense semantic retrieval
-  query: question + question_date when available
-  fusion: RRF over semantic, expanded semantic, lexical, and reflective views
-  routing: selected from question text only
+  dense retrieval with Qwen3 embedding
+  optional expanded and lexical retrieval views
+  BGE-M3 dedicated rerank for factual-slot questions
+  anchor retention after rerank to preserve high-rank dense evidence
+  route selected from question text only
 
-answer:
-  model: local Qwen/Qwen3-30B-A3B-Instruct-2507
-  temperature: 0.0
-  format: JSON with answer field
-  verification: used for narrow order / first temporal questions
+evidence / answer:
+  evidence-table compiler for temporal and multi-evidence tasks
+  concise JSON answer generation
+  answer-detail requirements to preserve distinguishing evidence
+  structured evidence finalizer for deterministic count, sum, order, and duration fixes
+  task-aware duration and list evidence requirements
+  relative-time and target-consistency guardrails
 
 judge:
-  model: DeepSeek
-  use: evaluation only
+  DeepSeek API for evaluation only
 ```
 
-## 
+More details:
 
-运行时只根据 question text 选择一个 route：
+- [Method](docs/method.md)
+
+## Project Layout
 
 ```text
-auto:
-  default route
-
-prefer_user:
-  for count / preference-like questions that should prefer user-side evidence
-
-duration_temporal:
-  for how long / since / days ago / weeks ago / months ago questions
-
-order_reflective:
-  for first / order / chronological questions
-  uses reflective retrieval and local answer verification
-
-state_history:
-  for previous / initial / original / used to / usually questions
-
-recency_auto:
-  for most recent / most recently questions
+src/agent_memory/baseline/     production memory pipeline
+src/agent_memory/prompts/      stable prompt profiles and templates
+src/agent_memory/core/         model clients, config, IO, shared schema
+src/agent_memory/datasets/     dataset loaders
+src/agent_memory/evaluation/   judge and metrics
+scripts/                       local vLLM service helpers
+outputs/retained/              retained judged artifacts
 ```
 
-这些 route 不读取 benchmark label，也不读取 gold answer。
+## Install
 
-## Configuration
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-默认配置文件：
+The project is run directly from `src` with `PYTHONPATH=src`; no package build
+step is required.
+
+## Services
+
+默认端口：
 
 ```text
-src/agent_memory/configs/base.yaml
+answer:    http://127.0.0.1:8000/v1
+embedding: http://127.0.0.1:8001/v1
+rerank:    http://127.0.0.1:8002/v1
 ```
 
-核心设置：
-
-```yaml
-retrieval:
-  chunk_unit: turn
-  top_k: 40
-
-answer:
-  temperature: 0.0
-  max_tokens: 8192
-  final_max_tokens: 1024
-
-embedding:
-  dims: 1024
-  normalize: true
-  max_input_bytes: 8192
-```
-
-## Project Structure
+默认 GPU 布局按当前服务器设置为三个服务都可见 `0,1,2,3`：
 
 ```text
-src/agent_memory/
-  baseline/
-    chunking.py     # turn-level memory chunk construction
-    store.py        # chunk / embedding / build stats persistence
-    retrieve.py     # dense retrieval, BM25 lexical retrieval, RRF fusion
-    routing.py      # route, strategy, and top-k rules
-    queries.py      # query text, lexical expansion, retrieved rerank helpers
-    guardrails.py   # answer post-processing and narrow guardrails
-    pipeline.py     # build / retrieve / answer orchestration
-  configs/          # model, retrieval, and path config
-  core/             # LLM, embedding, schema, IO utilities
-  datasets/         # LongMemEval and LoCoMo loaders
-  evaluation/       # judge and metrics
-  prompts/          # answer, retrieval, and judge prompts
-  run_baseline.py   # command-line entry
-
-data/               # local datasets; see dataset links below
-docs/               # method notes and evaluation summaries
-outputs/            # local outputs
+answer:    CUDA_VISIBLE_DEVICES=0,1,2,3, gpu_memory_utilization=0.70
+embedding: CUDA_VISIBLE_DEVICES=0,1,2,3, gpu_memory_utilization=0.10
+rerank:    CUDA_VISIBLE_DEVICES=0,1,2,3, gpu_memory_utilization=0.10
 ```
 
-Dataset files:
+启动、查看、停止全部服务：
 
-- `data/longmemeval_s_cleaned.json`: [LongMemEval-S cleaned](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json)
-- `data/locomo10.json`: [LoCoMo](https://github.com/snap-research/locomo/blob/main/data/locomo10.json)
+```bash
+bash scripts/serve_all.sh start
+bash scripts/serve_all.sh status
+bash scripts/serve_all.sh stop
+```
+
+也可以分别启动：
+
+```bash
+bash scripts/serve_answer.sh
+bash scripts/serve_embedding.sh
+bash scripts/serve_rerank.sh
+```
 
 ## Run
 
@@ -118,11 +99,12 @@ LongMemEval：
 
 ```bash
 PYTHONPATH=src python -m agent_memory.run_baseline \
+  --config src/agent_memory/configs/base.yaml \
   --dataset longmemeval \
   --data data/longmemeval_s_cleaned.json \
-  --out outputs/baseline/predictions.jsonl \
-  --store-root outputs/baseline/stores \
-  --log-file outputs/logs/run.log \
+  --out outputs/baseline/longmemeval_predictions.jsonl \
+  --store-root outputs/baseline/longmemeval_stores \
+  --log-file outputs/logs/longmemeval_run.log \
   --workers 4 \
   --overwrite
 ```
@@ -131,8 +113,10 @@ LoCoMo：
 
 ```bash
 PYTHONPATH=src python -m agent_memory.run_baseline \
+  --config src/agent_memory/configs/base.yaml \
   --dataset locomo \
   --data data/locomo10.json \
+  --exclude-question-type adversarial \
   --out outputs/baseline/locomo_predictions.jsonl \
   --store-root outputs/baseline/locomo_stores \
   --log-file outputs/logs/locomo_run.log \
@@ -140,32 +124,51 @@ PYTHONPATH=src python -m agent_memory.run_baseline \
   --overwrite
 ```
 
-也可以分阶段运行：
+## Evaluation
+
+Judge：
 
 ```bash
-PYTHONPATH=src python -m agent_memory.run_baseline --mode build ...
-PYTHONPATH=src python -m agent_memory.run_baseline --mode query ...
+PYTHONPATH=src python -m agent_memory.evaluation.judge \
+  --config src/agent_memory/configs/base.yaml \
+  --pred outputs/baseline/longmemeval_predictions.jsonl \
+  --out outputs/baseline/longmemeval_predictions.judge.jsonl \
+  --workers 8 \
+  --overwrite
 ```
 
-## Evaluation Results
+Metrics：
 
-LongMemEval：
-
-```text
-accuracy:          417 / 500 = 0.8340
-f1:                0.4538
-bleu:              0.1179
-build_tokens:      0
-query_tokens:      2,367,025
-avg_query_tokens:  4,734.1 / sample
+```bash
+PYTHONPATH=src python -m agent_memory.evaluation.metrics \
+  --pred outputs/baseline/longmemeval_predictions.judge.jsonl \
+  --out outputs/baseline/longmemeval_metrics.md
 ```
 
-LoCoMo：
+Retained result check：
+
+```bash
+PYTHONPATH=src python -m agent_memory.evaluation.retained
+```
+
+## Retained Result
+
+当前保留的 strong memory v1 结果：
 
 ```text
-accuracy:          1489 / 1986 = 0.7497
-f1:                0.5381
-bleu:              0.2371
-query_tokens:      2,520,124
-avg_query_tokens:  1,269.0 / sample
+LongMemEval full:
+  accuracy: 421 / 500 = 0.8420
+  avg query tokens: 4,714.2 / sample
+
+LoCoMo non-adversarial:
+  accuracy: 1248 / 1540 = 0.8104
+  avg query tokens: 5,150.8 / sample
+```
+
+Retained artifacts:
+
+```text
+outputs/retained/strong_memory_v1/longmemeval.judge.jsonl
+outputs/retained/strong_memory_v1/locomo_non_adversarial.judge.jsonl
+outputs/retained/strong_memory_v1/config.yaml
 ```

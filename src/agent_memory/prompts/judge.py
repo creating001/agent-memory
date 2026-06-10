@@ -114,4 +114,3 @@ def _longmemeval_template(question_type: str) -> str:
     if question_type == "abstention":
         return LONGMEMEVAL_ABSTENTION_TEMPLATE
     return LONGMEMEVAL_DEFAULT_TEMPLATE
-

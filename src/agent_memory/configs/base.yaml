@@ -1,4 +1,5 @@
 answer:
+  # Local answer model service.
   name: Qwen/Qwen3-30B-A3B-Instruct-2507
   base_url: http://127.0.0.1:8000/v1
   api_key_env: LOCAL_LLM_API_KEY
@@ -10,21 +11,64 @@ answer:
   timeout_seconds: 120
   max_retries: 2
   thinking: default
+  prompt_profile: stable_memory_v1
   max_context_chars: 12000
 
+  # Evidence compilation and answer finalization.
+  temporal_prompt: true
+  duration_evidence_requirements: true
+  duration_evidence_requirements_mode: duration_questions
+  multi_evidence_prompt: set_operations_when_needed
+  relative_temporal_guardrail: true
+  relative_temporal_guardrail_scope: evidence
+  relative_temporal_guardrail_loose: false
+  relative_temporal_guardrail_require_temporal_hypothesis: true
+  relative_temporal_guardrail_allow_insufficient_year: false
+  relative_temporal_guardrail_preserve_relative_weekday: true
+  relative_temporal_guardrail_future_relative: true
+  relative_temporal_guardrail_allow_excluded_relative: true
+  relative_temporal_guardrail_allow_insufficient_included_relative: true
+  target_consistency_guardrail: true
+  target_consistency_skip_inference_questions: true
+  target_consistency_relation_normalization: true
+  strict_multi_evidence: false
+  strict_multi_evidence_mode: count_like
+  list_evidence_requirements: true
+  answer_detail_requirements: true
+  answer_detail_requirements_mode: all
+  structured_evidence_finalizer: true
+
 embedding:
+  # Local embedding model service.
   name: Qwen/Qwen3-Embedding-0.6B
   base_url: http://127.0.0.1:8001/v1
   api_key: EMPTY
   dims: 1024
   max_model_len: 8192
-  gpu_memory_utilization: 0.05
+  gpu_memory_utilization: 0.10
   max_input_bytes: 8192
   normalize: true
   batch_size: 64
   query_instruction: Given a web search query, retrieve relevant passages that answer the query
 
+rerank:
+  # Dedicated rerank service. The gate keeps rerank on narrow factual-slot queries.
+  enabled: true
+  name: BAAI/bge-m3
+  base_url: http://127.0.0.1:8002/v1
+  backend: vllm
+  batch_size: 16
+  max_model_len: 8192
+  gpu_memory_utilization: 0.10
+  instruction: Given a web search query, retrieve relevant passages that answer the query
+  gate: factual_slot
+  anchor_after_top: 1
+  anchor_keep: 8
+  strategies:
+    - factual
+
 judge:
+  # Evaluation only. The judge is not used during prediction.
   name: deepseek-v4-flash
   base_url: https://api.deepseek.com
   api_key_env: DEEPSEEK_API_KEY
@@ -35,12 +79,29 @@ judge:
   thinking: default
 
 retrieval:
-  method: v50_narrow_temporal_recency_verify
+  # Unified retrieval policy shared by LongMemEval and LoCoMo.
+  method: strong_memory_evidence_finalized_v1
   chunk_unit: turn
+  relative_time_annotations: false
   top_k: 40
+  context_window: 1
+  context_window_top_n: 8
+  context_window_strategies:
+    - temporal
+  context_window_question_mode: list_context_v2
   hybrid_lexical_top_k: 5
+  factual_lexical_retrieve: true
+  factual_lexical_top_k: 10
+  factual_lexical_routes:
+    - auto
   lexical_include_date: false
+  dedicated_rerank_pool_k: 80
   evidence_rerank_keep: 12
+  collection_intent_routing: true
+  collection_intent_mode: enumerable_intent
+  collection_query_expansion: true
+  personalized_inference_routing: true
+  personalized_inference_mode: personalized_inference
 
 paths:
   env_file: .env
