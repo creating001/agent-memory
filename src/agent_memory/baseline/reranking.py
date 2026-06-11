@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent_memory.baseline import intent_features as features
 from agent_memory.baseline.config_aliases import normalize_rerank_gate
 from agent_memory.baseline.queries import rerank_retrieved
 from agent_memory.baseline.routing import QuestionStrategy
@@ -54,27 +55,27 @@ def should_use_dedicated_rerank(
     gate = normalize_rerank_gate(str(rerank_cfg.get("gate", "all")))
     if gate == "all":
         return True
-    if gate == "simple_factual_slots_v1":
+    if gate == "factual_slots":
         return example is not None and is_simple_factual_slot_question(example.question)
-    if gate == "simple_factual_slots_v2":
+    if gate == "factual_action_slots":
         return example is not None and is_simple_factual_slot_question(
             example.question,
             include_action_slots=True,
         )
-    if gate == "simple_factual_slots_v2_or_multi_evidence":
+    if gate == "factual_action_slots_or_multi_evidence":
         if strategy.name == "multi_evidence":
             return True
         return example is not None and is_simple_factual_slot_question(
             example.question,
             include_action_slots=True,
         )
-    if gate == "simple_factual_slots_v3":
+    if gate == "past_or_singular_action_slots":
         return example is not None and is_simple_factual_slot_question(
             example.question,
             include_action_slots=True,
             action_slot_mode="past_or_singular",
         )
-    if gate == "simple_factual_slots_v3_or_temporal":
+    if gate == "past_or_singular_action_slots_or_temporal":
         if strategy.name == "temporal":
             return True
         return example is not None and is_simple_factual_slot_question(
@@ -126,44 +127,7 @@ def is_simple_factual_slot_question(
 ) -> bool:
     """Gate rerank to narrow slot questions where cross-encoder precision is helpful."""
     lowered = re.sub(r"\s+", " ", question.lower()).strip()
-    broad_or_inference_signals = (
-        "what are ",
-        "what were ",
-        "what kind of ",
-        "what kinds of ",
-        "what type of ",
-        "what types of ",
-        "what style of ",
-        "what places ",
-        "what things ",
-        "what items ",
-        "what activities ",
-        "what events ",
-        "what books ",
-        "what games ",
-        "what bands ",
-        "what artists",
-        "what symbols ",
-        "who have ",
-        "who or which ",
-        "which places ",
-        "which bands ",
-        "which of ",
-        "shared ",
-        "similar ",
-        "likely ",
-        "might ",
-        "could ",
-        "would ",
-        "besides ",
-        "other than ",
-        "how often ",
-        "how did ",
-        "how many ",
-        "how long ",
-        "what can ",
-    )
-    if any(signal in lowered for signal in broad_or_inference_signals):
+    if any(signal in lowered for signal in features.RERANK_FACTUAL_SLOT_EXCLUSION_CUES):
         return False
 
     if any(marker in lowered for marker in (" from whom", " to whom", " with whom")):

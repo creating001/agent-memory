@@ -17,8 +17,8 @@ answer:
   # Evidence compilation and answer finalization.
   temporal_prompt: true
   duration_evidence_requirements: true
-  duration_evidence_requirements_mode: duration_questions
-  multi_evidence_prompt: set_operations_when_needed
+  duration_evidence_requirements_mode: duration_reasoning
+  multi_evidence_prompt: set_operation_aware
   relative_temporal_guardrail: true
   relative_temporal_guardrail_scope: evidence
   relative_temporal_guardrail_loose: false
@@ -88,7 +88,7 @@ retrieval:
   context_window_top_n: 8
   context_window_strategies:
     - temporal
-  context_window_question_mode: list_context_v2
+  context_window_question_mode: enumerable_context
   hybrid_lexical_top_k: 5
   factual_lexical_retrieve: true
   factual_lexical_top_k: 10

@@ -15,6 +15,7 @@ from agent_memory.baseline.context import (
     maybe_prioritize_sum_financial_context,
     retrieval_search_space,
 )
+from agent_memory.baseline.config_aliases import normalize_router_mode
 from agent_memory.baseline.guardrails import (
     apply_answer_guardrails,
     is_date_only_answer,
@@ -156,7 +157,8 @@ class StrongMemoryBaseline:
 
     def classify_route(self, example: Example) -> dict[str, Any] | None:
         retrieval_cfg = self.config.get("retrieval") or {}
-        if str(retrieval_cfg.get("router_mode", "legacy")) not in {"llm_task_v1", "llm_task_selective_v1"}:
+        mode = normalize_router_mode(str(retrieval_cfg.get("router_mode", "legacy")))
+        if mode not in {"semantic_task", "selective_semantic_task"}:
             return None
 
         answer_cfg = self.config["answer"]
@@ -187,10 +189,10 @@ class StrongMemoryBaseline:
         if not route_plan:
             return False
         retrieval_cfg = self.config.get("retrieval") or {}
-        mode = str(retrieval_cfg.get("router_mode", "legacy"))
-        if mode == "llm_task_v1":
+        mode = normalize_router_mode(str(retrieval_cfg.get("router_mode", "legacy")))
+        if mode == "semantic_task":
             return True
-        if mode != "llm_task_selective_v1":
+        if mode != "selective_semantic_task":
             return False
         strategies = {str(value) for value in retrieval_cfg.get("semantic_router_apply_strategies", [])}
         tasks = {str(value) for value in retrieval_cfg.get("semantic_router_apply_tasks", [])}

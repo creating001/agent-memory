@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent_memory.baseline import intent_features as features
 from agent_memory.baseline.config_aliases import (
     normalize_duration_evidence_mode,
     normalize_multi_evidence_prompt_mode,
+    normalize_router_mode,
 )
 from agent_memory.baseline.guardrails import (
     deterministic_relative_event_order_answer,
@@ -159,10 +161,8 @@ def use_temporal_prompt(config: dict[str, Any], strategy: QuestionStrategy, sett
 
 
 def uses_llm_task_router(config: dict[str, Any]) -> bool:
-    return str((config.get("retrieval") or {}).get("router_mode", "legacy")) in {
-        "llm_task_v1",
-        "llm_task_selective_v1",
-    }
+    mode = normalize_router_mode(str((config.get("retrieval") or {}).get("router_mode", "legacy")))
+    return mode in {"semantic_task", "selective_semantic_task"}
 
 
 def should_use_semantic_router_prompt_trace(config: dict[str, Any]) -> bool:
@@ -409,7 +409,7 @@ def effective_multi_evidence_prompt_mode(
 ) -> str:
     mode = normalize_multi_evidence_prompt_mode(str(answer_cfg.get("multi_evidence_prompt", "default")))
     if mode == "set_operation_selective":
-        return "set_operation" if is_set_operation_question_v2(question) else "scoped_aggregation"
+        return "set_operation" if is_set_operation_question_without_advice_frame(question) else "scoped_aggregation"
     if mode in {"set_operation", "scoped_aggregation"}:
         return mode
     return "scoped_aggregation"
@@ -426,19 +426,8 @@ def is_set_operation_question(question: str) -> bool:
     return bool(re.search(r"\bsimilar\b", normalized) and re.search(r"\b(pair|item|object|thing|place|activity)\b", normalized))
 
 
-def is_set_operation_question_v2(question: str) -> bool:
+def is_set_operation_question_without_advice_frame(question: str) -> bool:
     normalized = " ".join(question.lower().split())
-    preference_or_advice_signals = (
-        "recommend",
-        "suggest",
-        "advice",
-        "appropriate",
-        "good gift",
-        "gift for",
-        "would be a good",
-        "what should",
-        "which should",
-    )
-    if any(signal in normalized for signal in preference_or_advice_signals):
+    if any(signal in normalized for signal in features.SET_OPERATION_ADVICE_EXCLUSION_CUES):
         return False
     return is_set_operation_question(question)

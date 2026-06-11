@@ -1,12 +1,23 @@
+"""Question intent routing for the memory pipeline.
+
+The router maps question semantics to retrieval and answer-generation
+strategies. It is intentionally dataset-agnostic: routing only depends on the
+question text and runtime configuration, never on dataset names, sample ids,
+gold answers, or judge feedback.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
 from typing import Any
 
+from agent_memory.baseline import intent_features as features
 from agent_memory.baseline.config_aliases import (
     normalize_collection_intent_mode,
     normalize_preference_inference_mode,
+    normalize_router_mode,
+    normalize_strategy_profile,
 )
 from agent_memory.core.schema import Example
 
@@ -44,18 +55,18 @@ class RouteSettings:
 
 
 def choose_memory_route(example: Example, config: dict[str, Any] | None = None) -> str:
-    if router_mode(config) == "generic_v1":
+    if router_mode(config) == "surface_intent":
         return choose_memory_route_generic(example, config)
 
     question = example.question
     route = "auto"
-    collection_intent = use_collection_intent_routing(config) and is_collection_intent_question(
+    enumerable_intent = use_collection_intent_routing(config) and is_collection_intent_question(
         question.lower(),
         mode=collection_intent_mode(config),
     )
     base_strategy = choose_strategy(
         question,
-        profile=configured_profile("legacy_auto", config),
+        profile=configured_profile("general", config),
         collection_intent_routing=use_collection_intent_routing(config),
         personalized_inference_routing=use_personalized_inference_routing(config),
         preference_inference_mode=preference_inference_mode(config),
@@ -66,7 +77,7 @@ def choose_memory_route(example: Example, config: dict[str, Any] | None = None) 
         base_strategy.name in {"multi_evidence", "preference"}
         and not asks_assistant_memory(question)
         and not is_temporal_comparison_quantity_question(question)
-        and not collection_intent
+        and not enumerable_intent
         and not should_keep_auto_route(question, config)
     ):
         route = "prefer_user"
@@ -85,24 +96,24 @@ def choose_memory_route_generic(example: Example, config: dict[str, Any] | None 
     question = example.question
     lowered = question.lower()
     route = "auto"
-    collection_intent = use_collection_intent_routing(config) and is_collection_intent_question(
+    enumerable_intent = use_collection_intent_routing(config) and is_collection_intent_question(
         lowered,
         mode=collection_intent_mode(config),
     )
     base_strategy = choose_strategy(
         question,
-        profile=configured_profile("legacy_auto", config),
+        profile=configured_profile("general", config),
         collection_intent_routing=use_collection_intent_routing(config),
         personalized_inference_routing=use_personalized_inference_routing(config),
         preference_inference_mode=preference_inference_mode(config),
-        routing_mode="generic_v1",
+        routing_mode="surface_intent",
         collection_intent_mode=collection_intent_mode(config),
     )
     if (
         base_strategy.name in {"multi_evidence", "preference"}
         and not asks_assistant_memory(question)
         and not is_generic_temporal_comparison_quantity_question(lowered)
-        and not collection_intent
+        and not enumerable_intent
         and not should_keep_auto_route(question, config)
     ):
         route = "prefer_user"
@@ -140,7 +151,7 @@ def route_settings(route: str, config: dict[str, Any]) -> RouteSettings:
     if route == "prefer_user":
         prefer_user_top_k = int(config["retrieval"].get("prefer_user_top_k", 40))
         return RouteSettings(
-            strategy_profile=profile("legacy_auto"),
+            strategy_profile=profile("general"),
             top_k=prefer_user_top_k,
             prefer_user_chunks=True,
             use_evidence_rerank=False,
@@ -201,7 +212,7 @@ def route_settings(route: str, config: dict[str, Any]) -> RouteSettings:
             context_window_strategies=context_window_strategies,
         )
     return RouteSettings(
-        strategy_profile=profile("legacy_auto"),
+        strategy_profile=profile("general"),
         top_k=default_top_k,
         use_verification=configured_verification(),
         verification_strategies=configured_verification_strategies(),
@@ -218,13 +229,13 @@ def choose_strategy(
     collection_intent_routing: bool = False,
     personalized_inference_routing: bool = False,
     preference_inference_mode: str = "broad",
-    routing_mode: str = "legacy",
+    routing_mode: str = "rule_based",
     collection_intent_mode: str = "specific",
 ) -> QuestionStrategy:
     lowered = question.lower()
     use_word_boundary = profile.endswith("_boundary")
-    base_profile = profile.removesuffix("_boundary")
-    if routing_mode == "generic_v1":
+    base_profile = normalize_strategy_profile(profile.removesuffix("_boundary"))
+    if routing_mode == "surface_intent":
         if is_generic_preference_question(
             lowered,
             inference_signals=personalized_inference_routing,
@@ -249,7 +260,7 @@ def choose_strategy(
         inference_mode=preference_inference_mode,
     ):
         return preference_strategy()
-    if base_profile == "legacy_auto":
+    if base_profile == "general":
         if is_multi_evidence_question(
             lowered,
             word_boundary=use_word_boundary,
@@ -297,11 +308,7 @@ def effective_top_k(configured_top_k: int, strategy: QuestionStrategy, overrides
 
 def should_use_strict_multi_aggregation(question: str) -> bool:
     lowered = question.lower()
-    if "how many" in lowered and ("replace or fix" in lowered or "replaced or fixed" in lowered):
-        return True
-    if "years older" in lowered or "year older" in lowered or "how much older" in lowered:
-        return True
-    return "total number of siblings" in lowered or "how many siblings" in lowered
+    return any(re.search(pattern, lowered) for pattern in features.STRICT_MULTI_AGGREGATION_PATTERNS)
 
 
 def asks_explicit_assistant_memory(question: str) -> bool:
@@ -328,39 +335,7 @@ def is_recommendation_recall_question(question: str) -> bool:
 
 def asks_assistant_memory(question: str) -> bool:
     lowered = question.lower()
-    signals = (
-        "previous chat",
-        "previous conversation",
-        "previously discussed",
-        "looking back",
-        "trying to recall",
-        "we discussed",
-        "we talked about",
-        "talked about last time",
-        "last time",
-        "do you remember",
-        "remind me",
-        "you suggested",
-        "you said",
-        "you told",
-        "you mentioned",
-        "you provided",
-        "you gave",
-        "you recommended",
-        "you outlined",
-        "you created",
-        "you wrote",
-        "you called",
-        "you advised",
-        "what did you say",
-        "what did you tell",
-        "what did you suggest",
-        "what did you recommend",
-        "what advice did you",
-        "your suggestion",
-        "your recommendation",
-    )
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.ASSISTANT_MEMORY_REFERENCE_CUES)
 
 
 def temporal_strategy() -> QuestionStrategy:
@@ -401,20 +376,7 @@ def is_preference_question(
     inference_signals: bool = False,
     inference_mode: str = "broad",
 ) -> bool:
-    signals = (
-        "recommend",
-        "suggest",
-        "advice",
-        "any tips",
-        "what do you think",
-        "should i",
-        "would it be a good idea",
-        "help me decide",
-        "which should i",
-        "what should i",
-        "do you think it",
-    )
-    if any(signal in lowered for signal in signals):
+    if any(cue in lowered for cue in features.ADVICE_REQUEST_CUES):
         return True
     if not inference_signals:
         return False
@@ -423,42 +385,70 @@ def is_preference_question(
 
 def is_personalized_inference_question(lowered: str, *, mode: str = "broad") -> bool:
     normalized = " ".join(lowered.split())
-    if mode in {"narrow", "narrow_v2", "narrow_v3"}:
-        if mode in {"narrow_v2", "narrow_v3"} and re.search(r"\b(shop|store)\b", normalized):
+    if uses_conservative_inference_frames(mode):
+        if excludes_retail_context_for_inference(mode, normalized):
             return False
-        if mode == "narrow_v3" and re.search(r"\bwould\b.*\benjoy\b.*\bor\b", normalized):
+        if excludes_binary_affinity_choice(mode, normalized):
             return False
-        if re.search(r"\bwould\b.*\b(want to move|move back|open to moving|open to move|move to another country)\b", normalized):
+        if has_relocation_inference_frame(normalized):
             return True
-        if re.search(r"\b(is it likely|likely)\b.*\b(friends?|social circle|teammates?)\b", normalized):
+        if has_social_likelihood_frame(normalized):
             return True
-        if re.search(r"\b(would|might|likely)\b.*\b(enjoy|like|benefit from)\b", normalized):
+        if has_affinity_or_benefit_frame(normalized):
             return True
-        if "good hobby" in normalized or "good fit" in normalized:
+        if has_fit_quality_frame(normalized):
             return True
-        if re.search(r"\b(would|wouldn't|would not)\b.*\b(discomfort|allerg|trigger)\b", normalized):
+        if has_sensitivity_inference_frame(normalized):
             return True
         return False
     if re.search(r"\bwould(?:n't| not)?\b", normalized):
         return True
     if re.search(r"\b(is it likely|likely|might)\b", normalized):
         return True
-    inferential_phrases = (
-        "benefit from",
-        "good fit",
-        "be good for",
-        "would enjoy",
-        "might enjoy",
-        "likely enjoy",
-        "would like",
-        "might like",
-        "likely like",
-        "might consider",
-        "could consider",
-        "alternative career",
-        "underlying condition",
+    return any(phrase in normalized for phrase in features.PERSONALIZED_INFERENCE_PHRASES)
+
+
+def uses_conservative_inference_frames(mode: str) -> bool:
+    return mode in {
+        "conservative_inference_basic",
+        "conservative_inference_no_retail",
+        "conservative_inference",
+    }
+
+
+def excludes_retail_context_for_inference(mode: str, normalized: str) -> bool:
+    return mode in {"conservative_inference_no_retail", "conservative_inference"} and bool(
+        re.search(r"\b(shop|store)\b", normalized)
     )
-    return any(phrase in normalized for phrase in inferential_phrases)
+
+
+def excludes_binary_affinity_choice(mode: str, normalized: str) -> bool:
+    return mode == "conservative_inference" and bool(re.search(r"\bwould\b.*\benjoy\b.*\bor\b", normalized))
+
+
+def has_relocation_inference_frame(normalized: str) -> bool:
+    return bool(
+        re.search(
+            r"\bwould\b.*\b(want to move|move back|open to moving|open to move|move to another country)\b",
+            normalized,
+        )
+    )
+
+
+def has_social_likelihood_frame(normalized: str) -> bool:
+    return bool(re.search(r"\b(is it likely|likely)\b.*\b(friends?|social circle|teammates?)\b", normalized))
+
+
+def has_affinity_or_benefit_frame(normalized: str) -> bool:
+    return bool(re.search(r"\b(would|might|likely)\b.*\b(enjoy|like|benefit from)\b", normalized))
+
+
+def has_fit_quality_frame(normalized: str) -> bool:
+    return "good hobby" in normalized or "good fit" in normalized
+
+
+def has_sensitivity_inference_frame(normalized: str) -> bool:
+    return bool(re.search(r"\b(would|wouldn't|would not)\b.*\b(discomfort|allerg|trigger)\b", normalized))
 
 
 def configured_profile(name: str, config: dict[str, Any] | None) -> str:
@@ -468,9 +458,8 @@ def configured_profile(name: str, config: dict[str, Any] | None) -> str:
 
 
 def router_mode(config: dict[str, Any] | None) -> str:
-    if not config:
-        return "legacy"
-    return str(config.get("retrieval", {}).get("router_mode", "legacy"))
+    raw_mode = "legacy" if not config else str(config.get("retrieval", {}).get("router_mode", "legacy"))
+    return normalize_router_mode(raw_mode)
 
 
 def collection_intent_mode(config: dict[str, Any] | None) -> str:
@@ -511,93 +500,57 @@ def is_multi_evidence_question(
     if collection_intent_routing and is_collection_intent_question(lowered, mode=collection_intent_mode):
         return True
     if not word_boundary:
-        signals = (
-            "how many",
-            "how much",
-            "total",
-            "in total",
-            "combined",
-            "average",
-            "percentage",
-            "difference",
-            "more than",
-            "less than",
-            "spent",
-            "cost",
-            "count",
-            "sum",
-        )
-        return any(signal in lowered for signal in signals)
+        return any(cue in lowered for cue in features.AGGREGATION_CUES)
 
-    phrase_signals = (
-        "how many",
-        "how much",
-        "in total",
-        "combined",
-        "average",
-        "percentage",
-        "difference",
-        "more than",
-        "less than",
-    )
-    if any(signal in lowered for signal in phrase_signals):
+    if any(cue in lowered for cue in features.AGGREGATION_PHRASES):
         return True
-    word_signals = ("total", "spent", "cost", "costs", "count", "counts", "sum")
-    return any(re.search(rf"\b{re.escape(signal)}\b", lowered) for signal in word_signals)
+    return any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in features.AGGREGATION_TERMS)
 
 
 def is_collection_intent_question(lowered: str, *, mode: str = "specific") -> bool:
     normalized = " ".join(lowered.split())
-    if mode == "generic_v1":
-        return is_generic_list_collection_question(normalized)
-    if mode == "generic_v2":
-        return is_generic_list_collection_question_v2(normalized)
-    if mode == "core_plus_periodic_generic_v1":
+    mode = normalize_collection_intent_mode(mode)
+    if mode == "surface_head":
+        return is_plural_enumerable_head_question(normalized)
+    if mode == "bounded_head":
+        return is_bounded_enumerable_head_question(normalized)
+    if mode == "core_or_recurring":
         return is_core_set_or_name_list_question(normalized) or (
-            is_generic_list_collection_question_v2(normalized) and has_generic_list_periodic_scope(normalized)
+            is_bounded_enumerable_head_question(normalized) and has_enumerable_recurring_scope(normalized)
         )
-    if mode == "semantic_enumerable_v2":
-        return is_semantic_enumerable_list_question_v2(normalized)
-    if mode == "specific_plus_temporal_generic_v1":
-        return is_specific_list_collection_question(normalized) or (
-            is_generic_list_collection_question_v2(normalized) and has_generic_list_temporal_scope(normalized)
+    if mode == "semantic_enumerable":
+        return is_semantic_enumerable_question(normalized)
+    if mode == "explicit_or_temporal":
+        return is_explicit_enumerable_question(normalized) or (
+            is_bounded_enumerable_head_question(normalized) and has_enumerable_temporal_scope(normalized)
         )
-    if mode == "specific_plus_periodic_generic_v1":
-        return is_specific_list_collection_question(normalized) or (
-            is_generic_list_collection_question_v2(normalized) and has_generic_list_periodic_scope(normalized)
+    if mode == "explicit_or_recurring":
+        return is_explicit_enumerable_question(normalized) or (
+            is_bounded_enumerable_head_question(normalized) and has_enumerable_recurring_scope(normalized)
         )
-    return is_specific_list_collection_question(normalized)
+    return is_explicit_enumerable_question(normalized)
 
-def is_specific_list_collection_question(normalized: str) -> bool:
+
+def is_explicit_enumerable_question(normalized: str) -> bool:
     if re.search(r"\b(did|do|does|have|has)\b.*\bboth\b", normalized):
         return True
     if re.search(r"\b(what|which)\b.*\bboth\b", normalized):
         return True
     if normalized.startswith("what are the names of ") or normalized.startswith("what are ") and " names" in normalized:
         return True
-    collection_signals = (
-        "what books",
-        "what activities",
-        "what items",
-        "what people",
-        "what shelters",
-        "what states",
-        "what countries",
-        "what european countries",
-        "which countries",
-        "which european countries",
-        "which us cities",
-        "which u.s. cities",
-        "which city",
-        "which cities",
-        "which geographical locations",
-        "what authors",
-        "what pets",
-        "what damages",
-        "what subjects",
-        "what kind of interests",
+    return starts_with_wh_entity_head(
+        normalized,
+        operator="what",
+        heads=features.WHAT_ENUMERABLE_ENTITY_HEADS,
+    ) or starts_with_wh_entity_head(
+        normalized,
+        operator="which",
+        heads=features.WHICH_LOCATION_ENTITY_HEADS,
     )
-    return any(normalized.startswith(signal) for signal in collection_signals)
+
+
+def starts_with_wh_entity_head(normalized: str, *, operator: str, heads: tuple[str, ...]) -> bool:
+    return any(normalized.startswith(f"{operator} {head}") for head in heads)
 
 
 def is_core_set_or_name_list_question(normalized: str) -> bool:
@@ -606,12 +559,12 @@ def is_core_set_or_name_list_question(normalized: str) -> bool:
     return bool(re.search(r"^(?:what are|which)\b.*\bnames\b", normalized))
 
 
-def is_semantic_enumerable_list_question_v2(normalized: str) -> bool:
-    if is_non_enumerable_question_v2(normalized):
+def is_semantic_enumerable_question(normalized: str) -> bool:
+    if is_non_enumerable_attribute_question(normalized):
         return False
     if is_core_set_or_name_list_question(normalized):
         return True
-    if is_generic_list_collection_question_v2(normalized) and has_generic_list_periodic_scope(normalized):
+    if is_bounded_enumerable_head_question(normalized) and has_enumerable_recurring_scope(normalized):
         return True
     if not normalized.startswith(("what ", "which ")):
         return False
@@ -628,98 +581,19 @@ def is_semantic_enumerable_list_question_v2(normalized: str) -> bool:
 
 
 def has_plural_enumerable_head(tokens: list[str]) -> bool:
-    stop = {
-        "what",
-        "which",
-        "are",
-        "were",
-        "is",
-        "was",
-        "do",
-        "does",
-        "did",
-        "has",
-        "have",
-        "had",
-        "the",
-        "a",
-        "an",
-        "of",
-        "my",
-        "your",
-    }
-    irregular_plural = {"people", "children", "kids"}
     return any(
-        token not in stop and (token in irregular_plural or (token.endswith("s") and len(token) > 3))
+        token not in features.ENUMERABLE_HEAD_STOPWORDS
+        and (token in features.IRREGULAR_ENUMERABLE_HEADS or (token.endswith("s") and len(token) > 3))
         for token in tokens
     )
 
 
 def has_memory_experience_predicate(normalized: str) -> bool:
-    predicate_signals = (
-        "read",
-        "visit",
-        "visited",
-        "been to",
-        "buy",
-        "bought",
-        "made",
-        "done",
-        "partake",
-        "participated",
-        "attended",
-        "met",
-        "helped",
-        "mention",
-        "mentioned",
-        "volunteer",
-        "vacationed",
-        "collect",
-        "collected",
-        "enjoy",
-        "have",
-        "has",
-        "own",
-        "owns",
-        "adopted",
-        "recommend",
-        "recommended",
-        "use",
-        "uses",
-        "used",
-        "watch",
-        "watched",
-        "seen",
-        "travel",
-        "traveled",
-        "travelled",
-        "pursue",
-        "pursued",
-        "happened",
-    )
-    return any(re.search(rf"\b{re.escape(signal)}\b", normalized) for signal in predicate_signals)
+    return any(re.search(rf"\b{re.escape(predicate)}\b", normalized) for predicate in features.MEMORY_EVENT_PREDICATES)
 
 
 def is_non_enumerable_question(normalized: str) -> bool:
-    phrase_signals = (
-        "would",
-        "wouldn't",
-        "would not",
-        "might",
-        "likely",
-        "relationship status",
-        "what are some ",
-        "what personality traits",
-        "what kind of",
-        "what type of",
-        "which type of",
-        "what are the skills",
-        "what similar",
-        "what things",
-        "what causes",
-        "what areas",
-    )
-    if any(signal in normalized for signal in phrase_signals):
+    if any(cue in normalized for cue in features.NON_ENUMERABLE_SURFACE_CUES):
         return True
     if re.search(r"\bwhat does\b.*\bdo to\b", normalized):
         return True
@@ -728,18 +602,10 @@ def is_non_enumerable_question(normalized: str) -> bool:
     return bool(re.search(r"\bwhat is\b.*\bstatus\b", normalized))
 
 
-def is_non_enumerable_question_v2(normalized: str) -> bool:
+def is_non_enumerable_attribute_question(normalized: str) -> bool:
     if is_non_enumerable_question(normalized):
         return True
-    phrase_signals = (
-        "total number",
-        "what style",
-        "what styles",
-        "what kind of style",
-        "which style",
-        "which styles",
-    )
-    if any(signal in normalized for signal in phrase_signals):
+    if any(cue in normalized for cue in features.NON_ENUMERABLE_STYLE_CUES):
         return True
     return bool(re.search(r"^which\b.+\b[a-z]+'s\b", normalized))
 
@@ -779,7 +645,7 @@ def is_targeted_compatibility_question(question: str) -> bool:
     )
 
 
-def is_generic_list_collection_question(normalized: str) -> bool:
+def is_plural_enumerable_head_question(normalized: str) -> bool:
     if re.search(r"\b(did|do|does|have|has|what|which)\b.*\bboth\b", normalized):
         return True
     if re.search(r"^(?:what are|which)\b.*\bnames\b", normalized):
@@ -789,43 +655,11 @@ def is_generic_list_collection_question(normalized: str) -> bool:
     tokens = re.findall(r"[a-z0-9]+", normalized)
     if len(tokens) < 2:
         return False
-    stop = {
-        "what",
-        "which",
-        "are",
-        "were",
-        "is",
-        "was",
-        "do",
-        "did",
-        "does",
-        "have",
-        "has",
-        "the",
-        "a",
-        "an",
-        "my",
-        "i",
-        "we",
-        "you",
-        "first",
-        "last",
-        "latest",
-        "current",
-        "previous",
-        "initial",
-        "original",
-        "date",
-        "time",
-        "year",
-        "month",
-        "day",
-    }
-    content = [token for token in tokens[1:8] if token not in stop]
+    content = [token for token in tokens[1:8] if token not in features.PLURAL_HEAD_STOPWORDS]
     return any(token.endswith("s") and len(token) > 3 for token in content)
 
 
-def is_generic_list_collection_question_v2(normalized: str) -> bool:
+def is_bounded_enumerable_head_question(normalized: str) -> bool:
     """Identify explicit enumerable-list questions while avoiding descriptive attributes."""
     if re.search(r"\b(did|do|does|have|has|what|which)\b.*\bboth\b", normalized):
         return True
@@ -835,43 +669,13 @@ def is_generic_list_collection_question_v2(normalized: str) -> bool:
         return False
     if is_descriptive_or_advice_question(normalized):
         return False
-    return is_generic_list_collection_question(normalized)
+    return is_plural_enumerable_head_question(normalized)
 
 
 def is_descriptive_or_advice_question(normalized: str) -> bool:
-    descriptive_heads = (
-        "what emotions",
-        "what feelings",
-        "what attributes",
-        "what traits",
-        "what qualities",
-        "what characteristics",
-        "what habits",
-        "what dreams",
-        "what goals",
-        "what challenges",
-        "what difficulties",
-        "what problems",
-        "what ways",
-        "what methods",
-        "what reasons",
-        "what thoughts",
-        "what opinions",
-        "what memories",
-        "what progress",
-        "what focus",
-        "what kind of dream",
-    )
-    if normalized.startswith(descriptive_heads):
+    if normalized.startswith(features.DESCRIPTIVE_QUESTION_HEADS):
         return True
-    descriptive_patterns = (
-        r"\bwhat\b.*\b(?:represent|describe|mean|symbolize)\b",
-        r"\bwhat\b.*\b(?:motivat(?:e|es|ed|ing)|inspir(?:e|es|ed|ing))\b",
-        r"\bwhat\b.*\b(?:think|feel|say)\b.*\babout\b",
-        r"\bwhat\b.*\b(?:recommend|recommended|recommendations?|suggest|suggested|suggestions?|advice|tips)\b",
-        r"\bwhat\b.*\b(?:use|uses|used)\b.*\bfor\b",
-    )
-    return any(re.search(pattern, normalized) for pattern in descriptive_patterns)
+    return any(re.search(pattern, normalized) for pattern in features.DESCRIPTIVE_QUESTION_PATTERNS)
 
 
 def is_generic_preference_question(
@@ -880,23 +684,12 @@ def is_generic_preference_question(
     inference_signals: bool = False,
     inference_mode: str = "broad",
 ) -> bool:
-    signals = (
-        "recommend",
-        "suggest",
-        "advice",
-        "tips",
-        "should i",
-        "would it be a good idea",
-        "help me decide",
-        "which should i",
-        "what should i",
-    )
-    if any(signal in lowered for signal in signals):
+    if any(cue in lowered for cue in features.GENERIC_ADVICE_REQUEST_CUES):
         return True
     if not inference_signals:
         return False
     normalized = " ".join(lowered.split())
-    if inference_mode == "generic_v2":
+    if inference_mode == "contextual_inference":
         if re.search(r"\b(would|might|could)\b.*\b(pursue|want|consider|choose|do|have|be)\b", normalized):
             return True
         if " based on " in normalized and re.search(r"\b(would|might|could|likely)\b", normalized):
@@ -909,28 +702,11 @@ def is_generic_preference_question(
 
 
 def is_generic_temporal_question(lowered: str) -> bool:
-    signals = (
-        "when",
-        "what date",
-        "what time",
-        "how long",
-        "duration",
-        "since",
-        "before",
-        "after",
-        "earlier",
-        "later",
-        "first",
-        "chronological",
-        "earliest",
-        "latest",
-    )
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.TEMPORAL_SURFACE_CUES)
 
 
 def is_generic_recency_question(lowered: str) -> bool:
-    signals = ("current", "currently", "now", "latest", "most recent", "recently", "previous", "initial", "original", "used to")
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.GENERIC_RECENCY_CUES)
 
 
 def is_generic_order_route_question(lowered: str) -> bool:
@@ -949,7 +725,7 @@ def is_generic_duration_route_question(lowered: str) -> bool:
 
 
 def is_generic_historical_state_question(lowered: str) -> bool:
-    return any(signal in lowered for signal in ("previous", "initial", "original", "used to"))
+    return any(cue in lowered for cue in ("previous", "initial", "original", "used to"))
 
 
 def is_generic_most_recent_question(lowered: str) -> bool:
@@ -957,43 +733,28 @@ def is_generic_most_recent_question(lowered: str) -> bool:
 
 
 def is_generic_temporal_comparison_quantity_question(lowered: str) -> bool:
-    quantity_signals = ("how many", "how much", "difference", "compared")
-    return any(signal in lowered for signal in quantity_signals) and any(signal in lowered for signal in ("earlier", "later", "before", "after"))
+    return any(cue in lowered for cue in features.TEMPORAL_QUANTITY_CUES) and any(
+        cue in lowered for cue in features.TEMPORAL_ORDER_CUES
+    )
 
 
-def use_list_context_window_question(question: str) -> bool:
+def use_broad_enumerable_context_window_question(question: str) -> bool:
     normalized = " ".join(question.lower().split())
-    if re.search(r"\b(which|what)\s+(?:u\.?s\.?\s+)?cit(?:y|ies)\b", normalized):
+    if any(re.search(pattern, normalized) for pattern in features.BROAD_ENUMERABLE_CONTEXT_PATTERNS):
         return True
-    if re.search(r"\b(which|what)\s+(?:european\s+)?countr(?:y|ies)\b", normalized):
-        return True
-    if "which geographical locations" in normalized:
-        return True
-    if re.search(r"\bwhat subject\b.*\bboth\b", normalized):
-        return True
-    if re.search(r"\bwhat do\b.*\bboth have in common\b", normalized):
-        return True
-    if re.search(r"\bwhat items\b.*\b(buy|bought|purchase|purchased)\b", normalized):
+    if any(re.search(pattern, normalized) for pattern in features.EVENT_ENUMERABLE_CONTEXT_PATTERNS):
         return True
     return False
 
 
-def use_list_context_window_question_v2(question: str) -> bool:
+def use_temporally_scoped_enumerable_context_window_question(question: str) -> bool:
     normalized = " ".join(question.lower().split())
     if "most frequently" in normalized or "most frequent" in normalized:
         return False
-    if re.search(r"\b(which|what)\s+(?:u\.?s\.?\s+)?cities\b", normalized):
+    if any(re.search(pattern, normalized) for pattern in features.TEMPORALLY_SCOPED_ENUMERABLE_CONTEXT_PATTERNS):
         return True
-    if re.search(r"\b(which|what)\s+(?:european\s+)?countries\b", normalized):
-        return True
-    if "which geographical locations" in normalized:
-        return True
-    if re.search(r"\bwhat subject\b.*\bboth\b", normalized):
-        return True
-    if re.search(r"\bwhat do\b.*\bboth have in common\b", normalized):
-        return True
-    if re.search(r"\bwhat items\b.*\b(buy|bought|purchase|purchased)\b", normalized) and has_explicit_time_scope(
-        normalized
+    if any(re.search(pattern, normalized) for pattern in features.EVENT_ENUMERABLE_CONTEXT_PATTERNS) and (
+        has_explicit_time_scope(normalized)
     ):
         return True
     return False
@@ -1002,41 +763,33 @@ def use_list_context_window_question_v2(question: str) -> bool:
 def has_explicit_time_scope(normalized_question: str) -> bool:
     if re.search(r"\b20\d{2}\b", normalized_question):
         return True
-    months = (
-        "january",
-        "february",
-        "march",
-        "april",
-        "may",
-        "june",
-        "july",
-        "august",
-        "september",
-        "october",
-        "november",
-        "december",
-    )
-    return any(re.search(rf"\b{month}\b", normalized_question) for month in months)
+    return any(re.search(rf"\b{month}\b", normalized_question) for month in features.MONTH_NAMES)
 
 
-def has_generic_list_temporal_scope(normalized_question: str) -> bool:
+def has_enumerable_temporal_scope(normalized_question: str) -> bool:
     if has_explicit_time_scope(normalized_question):
         return True
-    if re.search(r"\b(?:past|last|next|this)\s+(?:day|week|month|year|summer|winter|spring|fall|autumn)\b", normalized_question):
+    if re.search(
+        r"\b(?:past|last|next|this)\s+(?:day|week|month|year|summer|winter|spring|fall|autumn)\b",
+        normalized_question,
+    ):
         return True
     if re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b", normalized_question):
         return True
-    if re.search(r"\b(?:mid|early|late)[-\s]+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b", normalized_question):
+    if re.search(
+        r"\b(?:mid|early|late)[-\s]+"
+        r"(?:january|february|march|april|may|june|july|august|september|october|november|december)\b",
+        normalized_question,
+    ):
         return True
     return False
 
 
-def has_generic_list_periodic_scope(normalized_question: str) -> bool:
+def has_enumerable_recurring_scope(normalized_question: str) -> bool:
     """Detect recurring or multi-anchor temporal scopes, not ordinary dated events."""
     if normalized_question.startswith(("what should ", "which should ")):
         return False
-    quantity_signals = ("how many", "how much", "total", "average", "sum", "combined", "difference")
-    if any(signal in normalized_question for signal in quantity_signals):
+    if any(cue in normalized_question for cue in features.RECURRING_SCOPE_EXCLUSION_CUES):
         return False
 
     weekday = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
@@ -1052,7 +805,10 @@ def has_generic_list_periodic_scope(normalized_question: str) -> bool:
         r"\b(?:usually|typically|regularly|routinely)\b", normalized_question
     ):
         return True
-    if re.search(r"\b(?:daily|weekly|monthly|yearly|annually|regularly|routinely|usually|typically)\b", normalized_question):
+    if re.search(
+        r"\b(?:daily|weekly|monthly|yearly|annually|regularly|routinely|usually|typically)\b",
+        normalized_question,
+    ):
         return True
     if re.search(r"\b(?:every|each)\s+(?:day|week|month|year|morning|evening|night)\b", normalized_question):
         return True
@@ -1060,128 +816,36 @@ def has_generic_list_periodic_scope(normalized_question: str) -> bool:
 
 
 def is_temporal_question(lowered: str) -> bool:
-    signals = (
-        "when",
-        "what date",
-        "which happened first",
-        "what happened first",
-        "happened first",
-        "occurred first",
-        "meet first",
-        "met first",
-        "order of",
-        "from earliest",
-        "earliest to latest",
-        "chronological",
-        "ago",
-        "before",
-        "after",
-        "earlier",
-        "later",
-        "how long",
-        "duration",
-        "since",
-        "last month",
-        "past month",
-        "past two weeks",
-        "this year",
-    )
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.TEMPORAL_RETRIEVAL_CUES)
 
 
 def is_strict_temporal_question(lowered: str) -> bool:
-    signals = (
-        "when",
-        "what date",
-        "what time",
-        "how long",
-        "how old",
-        "order of",
-        "from earliest",
-        "earliest to latest",
-        "chronological",
-        "which happened first",
-        "what happened first",
-        "happened first",
-        "occurred first",
-        "meet first",
-        "met first",
-        "first issue",
-        "last month",
-        "past month",
-        "previous frequent flyer",
-        "previous goal",
-        "before i started",
-        "before today",
-        "move you made after",
-        "period after",
+    return any(cue in lowered for cue in features.STRICT_TEMPORAL_CUES) or any(
+        re.search(pattern, lowered) for pattern in features.STRICT_TEMPORAL_PATTERNS
     )
-    return any(signal in lowered for signal in signals)
 
 
 def is_recency_question(lowered: str) -> bool:
-    signals = (
-        "current",
-        "currently",
-        "now",
-        "latest",
-        "most recent",
-        "recent",
-        "previous",
-        "previously",
-        "initial",
-        "initially",
-        "original",
-        "usually",
-        "used to",
-    )
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.RECENCY_STATE_CUES)
 
 
 def is_order_route_question(question: str) -> bool:
     lowered = question.lower()
-    signals = (
-        "order of",
-        "from earliest to latest",
-        "earliest to latest",
-        "chronological",
-        "which happened first",
-        "what happened first",
-        "happened first",
-        "occurred first",
-        "meet first",
-        "met first",
-        "purchase first",
-        "purchased first",
-        "buy first",
-        "bought first",
-        "first,",
-    )
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.ORDERING_CUES)
 
 
 def is_duration_route_question(question: str) -> bool:
     lowered = question.lower()
-    signals = (
-        "how many days",
-        "how many weeks",
-        "how many months",
-        "how long",
-        "days ago",
-        "weeks ago",
-        "months ago",
-        "since",
-    )
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.DURATION_CUES)
 
 
 def use_duration_evidence_requirements_question(question: str, *, mode: str = "all") -> bool:
     if mode == "all":
         return is_duration_route_question(question)
-    if mode not in {"narrow_v1", "narrow_v2", "narrow_v3"}:
+    if mode not in {"duration_shape", "duration_shape_without_elapsed_since", "strict_duration_shape"}:
         return False
     normalized = " ".join(question.lower().split())
-    if mode == "narrow_v3":
+    if mode == "strict_duration_shape":
         if re.search(r"\bhow long\b.*\btake\b", normalized):
             return True
         if re.search(r"\bhow many\s+days\s+did it take\b", normalized):
@@ -1191,7 +855,7 @@ def use_duration_evidence_requirements_question(question: str, *, mode: str = "a
         if re.search(r"\bdays\s+passed between\b", normalized):
             return True
         return False
-    if mode == "narrow_v2" and "how long has it been since" in normalized:
+    if mode == "duration_shape_without_elapsed_since" and "how long has it been since" in normalized:
         return False
     if "how long" in normalized or "for how long" in normalized:
         return True
@@ -1208,8 +872,7 @@ def is_historical_state_question(question: str) -> bool:
     if asks_assistant_memory(question):
         return False
     lowered = question.lower()
-    signals = ("previous", "initial", "initially", "original", "used to", "usually")
-    return any(signal in lowered for signal in signals)
+    return any(cue in lowered for cue in features.HISTORICAL_STATE_CUES)
 
 
 def is_most_recent_question(question: str) -> bool:
@@ -1219,5 +882,4 @@ def is_most_recent_question(question: str) -> bool:
 
 def is_temporal_comparison_quantity_question(question: str) -> bool:
     lowered = question.lower()
-    quantity_signals = ("how many", "how much", "difference", "compared")
-    return any(signal in lowered for signal in quantity_signals) and "earlier" in lowered
+    return any(cue in lowered for cue in features.TEMPORAL_QUANTITY_CUES) and "earlier" in lowered

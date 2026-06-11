@@ -3,12 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent_memory.baseline.config_aliases import normalize_context_window_mode
 from agent_memory.baseline.queries import rerank_retrieved
 from agent_memory.baseline.routing import (
     QuestionStrategy,
     RouteSettings,
-    use_list_context_window_question,
-    use_list_context_window_question_v2,
+    use_broad_enumerable_context_window_question,
+    use_temporally_scoped_enumerable_context_window_question,
 )
 from agent_memory.core.schema import Chunk, Example, RetrievedChunk
 
@@ -100,10 +101,14 @@ def effective_context_window(
 ) -> int:
     if settings.context_window <= 0:
         return 0
-    question_mode = str((config.get("retrieval") or {}).get("context_window_question_mode", ""))
-    if question_mode == "list_context_v1" and use_list_context_window_question(question):
+    question_mode = normalize_context_window_mode(
+        str((config.get("retrieval") or {}).get("context_window_question_mode", ""))
+    )
+    if question_mode == "broad_enumerable_context" and use_broad_enumerable_context_window_question(question):
         return settings.context_window
-    if question_mode == "list_context_v2" and use_list_context_window_question_v2(question):
+    if question_mode == "temporal_enumerable_context" and use_temporally_scoped_enumerable_context_window_question(
+        question
+    ):
         return settings.context_window
     if settings.context_window_strategies and strategy.name not in settings.context_window_strategies:
         return 0
